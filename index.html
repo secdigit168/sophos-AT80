@@ -104,8 +104,8 @@
   }
   .read-toggle-btn:hover{background:var(--indigo-500);}
   .read-toggle-btn.playing{background:var(--navy-700);}
-  .read-toggle-btn::before{content:"\25B6";font-size:9pt;}
-  .read-toggle-btn.playing::before{content:"\23F8";}
+  .read-toggle-btn.paused{background:var(--indigo-500);}
+  .read-toggle-btn .icon{font-size:10pt;}
   .rate-select{
     border:1px solid var(--border);border-radius:14px;background:#fff;color:var(--text);
     font-size:10pt;padding:4px 10px;cursor:pointer;
@@ -8497,14 +8497,89 @@
     }
   }
 
-  // ---------- Text-to-Speech (narration) ----------
-  var RATE_OPTIONS = [0.75, 0.85, 1.0, 1.1, 1.2, 1.3];
-  var DEFAULT_RATE = 1.0;
-  var currentRate = DEFAULT_RATE;
-  var ttsVoice = null;
-  var ttsPlaying = false;   // true while user has narration turned on (persists across auto-advance)
-  var ttsUtterance = null;
+  // ---------- Chapter read-aloud (Traditional Chinese text-to-speech) ----------
+  var synth = window.speechSynthesis || null;
+  var readState = 'stopped'; // 'stopped' | 'playing' | 'paused'
+  var pausedAtIndex = null;
+  var selectedVoice = null;   // SpeechSynthesisVoice
+  var selectedRate = 1.0;     // default reading speed
+  var voicesList = [];
   var ttsKeepAliveTimer = null;
+  var ttsStartToken = 0;      // invalidates stale delayed speak() calls from a previous nav/stop
+
+  function pickDefaultVoice(){
+    if(!synth) return null;
+    // Prefer Google's Taiwan Mandarin voice specifically (Chrome: "Google 國語（台灣）")
+    var v = voicesList.find(function(x){ return /zh-TW/i.test(x.lang) && /Google/i.test(x.name); });
+    if(!v) v = voicesList.find(function(x){ return /zh-TW/i.test(x.lang) && (x.name.indexOf('國語') !== -1 || x.name.indexOf('台灣') !== -1); });
+    if(!v) v = voicesList.find(function(x){ return /zh-TW/i.test(x.lang); });
+    if(!v) v = voicesList.find(function(x){ return /zh-HK/i.test(x.lang); });
+    if(!v) v = voicesList.find(function(x){ return /zh/i.test(x.lang); });
+    return v || null;
+  }
+
+  function loadVoices(){
+    if(!synth) return;
+    voicesList = synth.getVoices() || [];
+    if(!selectedVoice) selectedVoice = pickDefaultVoice();
+  }
+  if(synth){
+    loadVoices();
+    if(synth.addEventListener) synth.addEventListener('voiceschanged', loadVoices);
+  }
+
+  function populateRateSelect(i){
+    var page = pages[i];
+    if(!page) return;
+    var sel = page.querySelector('.rate-select');
+    if(!sel) return;
+    if(sel.getAttribute('data-filled') === '1'){
+      sel.value = String(selectedRate);
+      return;
+    }
+    [['0.75','0.75x（較慢）'],['0.85','0.85x'],['1','1.0x（預設）'],['1.15','1.15x'],['1.3','1.3x（較快）']].forEach(function(pair){
+      var opt = document.createElement('option');
+      opt.value = pair[0];
+      opt.textContent = pair[1];
+      sel.appendChild(opt);
+    });
+    sel.value = String(selectedRate);
+    sel.setAttribute('data-filled', '1');
+    sel.addEventListener('change', function(){
+      selectedRate = parseFloat(sel.value) || 1.0;
+      document.querySelectorAll('.rate-select[data-filled="1"]').forEach(function(s2){
+        if(s2 !== sel) s2.value = sel.value;
+      });
+      if(readState === 'playing'){
+        // restart current utterance at the new rate
+        speakIndex(current);
+      }
+    });
+  }
+
+  function getReadableText(i){
+    var page = pages[i];
+    if(!page) return '';
+    var col = page.querySelector('.slide-text-col');
+    if(!col) return '';
+    return (col.innerText || col.textContent || '').trim();
+  }
+
+  function updateReadButtons(){
+    document.querySelectorAll('.read-toggle-btn').forEach(function(b){
+      b.classList.remove('playing','paused');
+      var icon = '\u25B6', label = '朗讀本頁';
+      if(readState === 'playing'){ icon = '\u23F8'; label = '暫停朗讀'; b.classList.add('playing'); }
+      else if(readState === 'paused'){ icon = '\u25B6'; label = '繼續朗讀'; b.classList.add('paused'); }
+      b.innerHTML = '';
+      var iconSpan = document.createElement('span');
+      iconSpan.className = 'icon';
+      iconSpan.textContent = icon;
+      b.appendChild(iconSpan);
+      b.appendChild(document.createTextNode(' ' + label));
+    });
+  }
+
   function clearKeepAlive(){
     if(ttsKeepAliveTimer){ clearInterval(ttsKeepAliveTimer); ttsKeepAliveTimer = null; }
   }
@@ -8512,146 +8587,105 @@
     clearKeepAlive();
     // Chrome silently stops long utterances after ~15s unless nudged with pause/resume.
     ttsKeepAliveTimer = setInterval(function(){
-      if(window.speechSynthesis.speaking){
-        window.speechSynthesis.pause();
-        window.speechSynthesis.resume();
+      if(synth && synth.speaking){
+        synth.pause();
+        synth.resume();
       }
     }, 9000);
   }
 
-  function pickVoice(){
-    if(!('speechSynthesis' in window)) return null;
-    var voices = window.speechSynthesis.getVoices();
-    if(!voices || !voices.length) return null;
-    var v = voices.find(function(v){ return v.lang === 'zh-TW' && /google/i.test(v.name); });
-    if(!v) v = voices.find(function(v){ return v.lang === 'zh-TW'; });
-    if(!v) v = voices.find(function(v){ return /^zh/i.test(v.lang); });
-    return v || null;
-  }
-  if('speechSynthesis' in window){
-    window.speechSynthesis.onvoiceschanged = function(){ ttsVoice = pickVoice(); };
-    ttsVoice = pickVoice();
-  }
-
-  function extractPageText(page){
-    var tc = page.querySelector('.slide-text-col');
-    if(!tc) return '';
-    return tc.textContent.replace(/\s+/g,' ').trim();
-  }
-
-  function setupReadControls(page){
-    var btn = page.querySelector('.read-toggle-btn');
-    var sel = page.querySelector('.rate-select');
-    if(!btn || !sel) return;
-    if(btn.getAttribute('data-bound') === '1') return;
-    btn.setAttribute('data-bound', '1');
-
-    if(!sel.options.length){
-      RATE_OPTIONS.forEach(function(r){
-        var opt = document.createElement('option');
-        opt.value = r;
-        opt.textContent = r.toFixed(2).replace(/0$/,'') + 'x';
-        if(r === DEFAULT_RATE) opt.selected = true;
-        sel.appendChild(opt);
-      });
-    }
-    sel.value = currentRate;
-
-    btn.addEventListener('click', function(){
-      if(ttsPlaying){
-        stopNarration();
-      }else{
-        startNarration(pages.indexOf(page));
-      }
-    });
-    sel.addEventListener('change', function(){
-      currentRate = parseFloat(sel.value) || DEFAULT_RATE;
-      // keep all rate selects in sync
-      pages.forEach(function(p){
-        var s = p.querySelector('.rate-select');
-        if(s) s.value = currentRate;
-      });
-      if(ttsPlaying){
-        // restart current utterance at new rate
-        var idx = current;
-        stopNarration(true);
-        startNarration(idx);
-      }
-    });
-  }
-
-  function updateToggleUI(){
-    pages.forEach(function(p){
-      var btn = p.querySelector('.read-toggle-btn');
-      if(btn) btn.classList.toggle('playing', ttsPlaying && p === pages[current]);
-    });
-  }
-
-  function stopNarration(keepPlayingFlag){
-    ttsStartToken++; // invalidate any pending delayed speak() from startNarration
+  function stopReading(){
+    ttsStartToken++; // invalidate any pending delayed speak() from speakIndex
     clearKeepAlive();
-    if('speechSynthesis' in window){ window.speechSynthesis.cancel(); }
-    ttsUtterance = null;
-    if(!keepPlayingFlag) ttsPlaying = false;
-    updateToggleUI();
+    readState = 'stopped';
+    pausedAtIndex = null;
+    if(synth){ try{ synth.cancel(); }catch(e){} }
+    updateReadButtons();
   }
 
-  var ttsStartToken = 0;
-  function startNarration(i){
-    if(!('speechSynthesis' in window)) return;
+  function speakIndex(i){
+    if(!synth || readState !== 'playing') return;
     var page = pages[i];
-    if(!page) return;
-    var text = extractPageText(page);
+    if(!page){ stopReading(); return; }
+    var text = getReadableText(i);
+    ttsStartToken++;
+    var myToken = ttsStartToken;
     clearKeepAlive();
-    window.speechSynthesis.cancel();
-    ttsPlaying = true;
-    updateToggleUI();
-    if(!text){
-      // nothing to read on this page; try continuing to next page in same chapter
-      onNarrationEnd(i);
-      return;
-    }
-    // Chrome can silently drop speak() if it is called in the same tick as cancel().
+    try{ synth.cancel(); }catch(e){}
+    if(!text){ advanceReading(i); return; }
+    // Chrome can silently drop speak() if it's called in the same tick as cancel().
     // A short delay lets the cancel actually take effect first.
-    var myToken = ++ttsStartToken;
     setTimeout(function(){
       if(myToken !== ttsStartToken) return; // superseded by a newer nav/stop before this fired
-      if(!ttsPlaying) return;
-      var u = new SpeechSynthesisUtterance(text);
-      u.lang = 'zh-TW';
-      if(ttsVoice) u.voice = ttsVoice;
-      u.rate = currentRate;
-      u.onstart = function(){ startKeepAlive(); };
-      u.onend = function(){ clearKeepAlive(); onNarrationEnd(i); };
-      u.onerror = function(){ clearKeepAlive(); ttsPlaying = false; updateToggleUI(); };
-      ttsUtterance = u;
-      window.speechSynthesis.speak(u);
+      if(readState !== 'playing') return;
+      var utter = new SpeechSynthesisUtterance(text);
+      utter.lang = (selectedVoice && selectedVoice.lang) ? selectedVoice.lang : 'zh-TW';
+      if(selectedVoice) utter.voice = selectedVoice;
+      utter.rate = selectedRate;
+      utter.onstart = function(){ startKeepAlive(); };
+      utter.onend = function(){
+        clearKeepAlive();
+        if(readState === 'playing') advanceReading(i);
+      };
+      utter.onerror = function(){ clearKeepAlive(); /* likely caused by cancel(); ignore */ };
+      synth.speak(utter);
     }, 80);
   }
 
-  function onNarrationEnd(i){
-    if(!ttsPlaying) return; // user stopped manually
+  function advanceReading(i){
     var page = pages[i];
     var nextPage = pages[i+1];
-    if(page && nextPage && nextPage.getAttribute('data-chapter-id') &&
-       nextPage.getAttribute('data-chapter-id') === page.getAttribute('data-chapter-id')){
-      show(i+1);
-      startNarration(i+1);
-    }else{
-      ttsPlaying = false;
-      updateToggleUI();
+    var curChapter = page ? page.getAttribute('data-chapter-id') : null;
+    if(nextPage && curChapter && nextPage.getAttribute('data-chapter-id') === curChapter){
+      show(i+1, true);
+      speakIndex(i+1);
+    } else {
+      stopReading();
     }
   }
 
-  // Manual navigation (buttons / keyboard / tabs): if narration is currently on,
-  // keep it on and read whichever page the user lands on. Otherwise navigate silently.
-  function gotoPage(i){
-    var wasPlaying = ttsPlaying;
-    show(i);
-    if(wasPlaying){
-      startNarration(current);
+  function startReadingFrom(i){
+    if(!synth){ alert('您的瀏覽器不支援語音朗讀功能。'); return; }
+    readState = 'playing';
+    pausedAtIndex = null;
+    updateReadButtons();
+    speakIndex(i);
+  }
+
+  function pauseReading(){
+    if(readState !== 'playing') return;
+    readState = 'paused';
+    pausedAtIndex = current;
+    clearKeepAlive();
+    if(synth){ try{ synth.pause(); }catch(e){} }
+    updateReadButtons();
+  }
+
+  function resumeReading(){
+    if(readState !== 'paused') return;
+    readState = 'playing';
+    updateReadButtons();
+    if(pausedAtIndex === current && synth){
+      try{ synth.resume(); }catch(e){}
+      startKeepAlive();
+    } else {
+      speakIndex(current);
     }
   }
+
+  function toggleReadPlay(pageIdx){
+    if(readState === 'playing'){ pauseReading(); }
+    else if(readState === 'paused'){ resumeReading(); }
+    else { startReadingFrom(pageIdx); }
+  }
+
+  document.addEventListener('click', function(e){
+    var btn = e.target.closest ? e.target.closest('.read-toggle-btn') : null;
+    if(!btn) return;
+    var pageEl = btn.closest('.page-view');
+    var idx = pageEl ? parseInt(pageEl.getAttribute('data-index'), 10) : current;
+    toggleReadPlay(idx);
+  });
 
   function loadImagesFor(i){
     if(i < 0 || i > total-1) return;
@@ -8664,14 +8698,16 @@
     });
   }
 
-  function show(i){
+  function show(i, fromReading){
     try{
       if(i < 0) i = 0;
       if(i > total-1) i = total-1;
+      var wasPlaying = (!fromReading && readState === 'playing');
+      var wasPaused = (!fromReading && readState === 'paused');
       if(pages[current]) pages[current].classList.remove('active');
       current = i;
       populateText(current);
-      setupReadControls(pages[current]);
+      populateRateSelect(current);
       loadImagesFor(current);
       loadImagesFor(current+1);
       loadImagesFor(current-1);
@@ -8681,6 +8717,15 @@
       nextBtn.classList.toggle('disabled', current===total-1);
       safeHash(current);
       syncTabs(current);
+      if(wasPlaying){
+        // manual navigation while actively reading: keep reading, continue on the new page
+        speakIndex(current);
+      } else if(wasPaused){
+        // manual navigation while paused: stay paused; resuming later will restart on this new page
+        clearKeepAlive();
+        if(synth){ try{ synth.cancel(); }catch(e){} }
+      }
+      updateReadButtons();
       var tc = pages[current].querySelector('.slide-text-col');
       if(tc) tc.scrollTop = 0;
     }catch(err){
@@ -8688,19 +8733,19 @@
     }
   }
 
-  prevBtn.addEventListener('click', function(){ gotoPage(current-1); });
-  nextBtn.addEventListener('click', function(){ gotoPage(current+1); });
+  prevBtn.addEventListener('click', function(){ show(current-1); });
+  nextBtn.addEventListener('click', function(){ show(current+1); });
 
   document.addEventListener('keydown', function(e){
-    if(e.key === 'ArrowRight'){ gotoPage(current+1); }
-    else if(e.key === 'ArrowLeft'){ gotoPage(current-1); }
+    if(e.key === 'ArrowRight'){ show(current+1); }
+    else if(e.key === 'ArrowLeft'){ show(current-1); }
   });
 
   tabButtons.forEach(function(btn){
     btn.addEventListener('click', function(){
       var mod = btn.dataset.module;
       if(moduleFirstIndex.hasOwnProperty(mod)){
-        gotoPage(moduleFirstIndex[mod]);
+        show(moduleFirstIndex[mod]);
       }
     });
   });
