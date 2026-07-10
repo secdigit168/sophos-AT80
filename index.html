@@ -8504,6 +8504,20 @@
   var ttsVoice = null;
   var ttsPlaying = false;   // true while user has narration turned on (persists across auto-advance)
   var ttsUtterance = null;
+  var ttsKeepAliveTimer = null;
+  function clearKeepAlive(){
+    if(ttsKeepAliveTimer){ clearInterval(ttsKeepAliveTimer); ttsKeepAliveTimer = null; }
+  }
+  function startKeepAlive(){
+    clearKeepAlive();
+    // Chrome silently stops long utterances after ~15s unless nudged with pause/resume.
+    ttsKeepAliveTimer = setInterval(function(){
+      if(window.speechSynthesis.speaking){
+        window.speechSynthesis.pause();
+        window.speechSynthesis.resume();
+      }
+    }, 9000);
+  }
 
   function pickVoice(){
     if(!('speechSynthesis' in window)) return null;
@@ -8574,17 +8588,21 @@
   }
 
   function stopNarration(keepPlayingFlag){
+    ttsStartToken++; // invalidate any pending delayed speak() from startNarration
+    clearKeepAlive();
     if('speechSynthesis' in window){ window.speechSynthesis.cancel(); }
     ttsUtterance = null;
     if(!keepPlayingFlag) ttsPlaying = false;
     updateToggleUI();
   }
 
+  var ttsStartToken = 0;
   function startNarration(i){
     if(!('speechSynthesis' in window)) return;
     var page = pages[i];
     if(!page) return;
     var text = extractPageText(page);
+    clearKeepAlive();
     window.speechSynthesis.cancel();
     ttsPlaying = true;
     updateToggleUI();
@@ -8593,14 +8611,22 @@
       onNarrationEnd(i);
       return;
     }
-    var u = new SpeechSynthesisUtterance(text);
-    u.lang = 'zh-TW';
-    if(ttsVoice) u.voice = ttsVoice;
-    u.rate = currentRate;
-    u.onend = function(){ onNarrationEnd(i); };
-    u.onerror = function(){ ttsPlaying = false; updateToggleUI(); };
-    ttsUtterance = u;
-    window.speechSynthesis.speak(u);
+    // Chrome can silently drop speak() if it is called in the same tick as cancel().
+    // A short delay lets the cancel actually take effect first.
+    var myToken = ++ttsStartToken;
+    setTimeout(function(){
+      if(myToken !== ttsStartToken) return; // superseded by a newer nav/stop before this fired
+      if(!ttsPlaying) return;
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-TW';
+      if(ttsVoice) u.voice = ttsVoice;
+      u.rate = currentRate;
+      u.onstart = function(){ startKeepAlive(); };
+      u.onend = function(){ clearKeepAlive(); onNarrationEnd(i); };
+      u.onerror = function(){ clearKeepAlive(); ttsPlaying = false; updateToggleUI(); };
+      ttsUtterance = u;
+      window.speechSynthesis.speak(u);
+    }, 80);
   }
 
   function onNarrationEnd(i){
