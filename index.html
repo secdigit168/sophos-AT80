@@ -8449,7 +8449,7 @@
 </div>
 
 <footer class="site-footer">
-  <span>安數科技股份有限公司 SECDigit｜Sophos 授權代理商</span>
+  <span>安數科技股份有限公司 SECDigit｜Sophos 授權經銷商</span>
   <span>電話 02-26596959｜sales@SECDigit.com.tw｜台北市內湖區陽光街321巷56號5樓之6｜https://www.SECDigit.com.tw</span>
 </footer>
 
@@ -8609,12 +8609,21 @@
     var nextPage = pages[i+1];
     if(page && nextPage && nextPage.getAttribute('data-chapter-id') &&
        nextPage.getAttribute('data-chapter-id') === page.getAttribute('data-chapter-id')){
-      autoAdvancing = true;
       show(i+1);
       startNarration(i+1);
     }else{
       ttsPlaying = false;
       updateToggleUI();
+    }
+  }
+
+  // Manual navigation (buttons / keyboard / tabs): if narration is currently on,
+  // keep it on and read whichever page the user lands on. Otherwise navigate silently.
+  function gotoPage(i){
+    var wasPlaying = ttsPlaying;
+    show(i);
+    if(wasPlaying){
+      startNarration(current);
     }
   }
 
@@ -8629,11 +8638,8 @@
     });
   }
 
-  var autoAdvancing = false;
   function show(i){
     try{
-      if(ttsPlaying && !autoAdvancing){ stopNarration(); }
-      autoAdvancing = false;
       if(i < 0) i = 0;
       if(i > total-1) i = total-1;
       if(pages[current]) pages[current].classList.remove('active');
@@ -8656,19 +8662,19 @@
     }
   }
 
-  prevBtn.addEventListener('click', function(){ show(current-1); });
-  nextBtn.addEventListener('click', function(){ show(current+1); });
+  prevBtn.addEventListener('click', function(){ gotoPage(current-1); });
+  nextBtn.addEventListener('click', function(){ gotoPage(current+1); });
 
   document.addEventListener('keydown', function(e){
-    if(e.key === 'ArrowRight'){ show(current+1); }
-    else if(e.key === 'ArrowLeft'){ show(current-1); }
+    if(e.key === 'ArrowRight'){ gotoPage(current+1); }
+    else if(e.key === 'ArrowLeft'){ gotoPage(current-1); }
   });
 
   tabButtons.forEach(function(btn){
     btn.addEventListener('click', function(){
       var mod = btn.dataset.module;
       if(moduleFirstIndex.hasOwnProperty(mod)){
-        show(moduleFirstIndex[mod]);
+        gotoPage(moduleFirstIndex[mod]);
       }
     });
   });
